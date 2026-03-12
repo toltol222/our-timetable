@@ -25,6 +25,8 @@ ROW_ORDER = PERIODS + ["종례"]
 DATA_COLS = ["수업날짜", "기록일시", "요일", "구분", "교시", "반", "유형", "내용", "목표"]
 CONFIG_COLS = ["요일", "교시", "학급"]
 
+PLANNING_YEAR = 2026
+
 
 # -------------------------------------------------
 # 사용자 / 파일 유틸
@@ -65,7 +67,7 @@ def make_config_key(day: str, period: str, user_id: str) -> str:
 
 
 # -------------------------------------------------
-# 날짜/주차 유틸
+# 날짜 / 주차 유틸
 # -------------------------------------------------
 def to_date_safe(value):
     if isinstance(value, datetime):
@@ -108,6 +110,21 @@ def format_week_label(week_start: date) -> str:
     week_end = week_start + timedelta(days=4)
     month_week = get_week_of_month(week_start)
     return f"{week_start.year}년 {week_start.month}월 {month_week}주차 ({week_start:%m.%d}~{week_end:%m.%d})"
+
+
+def generate_year_week_starts(year: int) -> list[date]:
+    """
+    해당 연도의 모든 월~금 주차 시작일(월요일) 생성
+    """
+    start = date(year, 1, 1)
+    end = date(year, 12, 31)
+
+    current = get_monday(start)
+    weeks = []
+    while current <= end:
+        weeks.append(current)
+        current += timedelta(days=7)
+    return weeks
 
 
 # -------------------------------------------------
@@ -217,21 +234,20 @@ def has_any_timetable(config_df: pd.DataFrame) -> bool:
 
 
 # -------------------------------------------------
-# 주차/표시 데이터
+# 데이터 가공
 # -------------------------------------------------
-def get_available_week_starts(df: pd.DataFrame) -> list[date]:
-    week_starts = []
+def get_available_week_starts(df: pd.DataFrame, planning_year: int) -> list[date]:
+    # 2026년 전체 주차 + 기존 데이터가 있는 주차 모두 포함
+    year_weeks = generate_year_week_starts(planning_year)
+    data_weeks = []
 
     if not df.empty and "주차시작" in df.columns:
         for v in df["주차시작"].dropna().tolist():
             if isinstance(v, date):
-                week_starts.append(v)
+                data_weeks.append(v)
 
-    current_week = get_monday(date.today())
-    if current_week not in week_starts:
-        week_starts.append(current_week)
-
-    return sorted(set(week_starts), reverse=True)
+    all_weeks = sorted(set(year_weeks + data_weeks), reverse=True)
+    return all_weeks
 
 
 def filter_df_by_week(df: pd.DataFrame, week_start: date) -> pd.DataFrame:
@@ -546,6 +562,14 @@ def render_timetable_html(cells: dict) -> str:
 
     html += "</tbody></table></div>"
     return html
+
+
+# -------------------------------------------------
+# 개별 칸 초기화 콜백
+# -------------------------------------------------
+def clear_single_cell(day: str, row_name: str, safe_user: str) -> None:
+    key = make_input_key(day, row_name, safe_user)
+    st.session_state[key] = ""
 
 
 # -------------------------------------------------
@@ -945,7 +969,7 @@ if not timetable_exists:
 # -------------------------------------------------
 # 상단: 주차 선택
 # -------------------------------------------------
-available_week_starts = get_available_week_starts(prepared_df)
+available_week_starts = get_available_week_starts(prepared_df, PLANNING_YEAR)
 if st.session_state[selected_week_key] not in available_week_starts:
     available_week_starts = [st.session_state[selected_week_key]] + available_week_starts
     available_week_starts = sorted(set(available_week_starts), reverse=True)
@@ -1010,10 +1034,11 @@ with top2:
 
 st.markdown("")
 
-header_cols = st.columns([0.9, 1.4, 4.9])
+header_cols = st.columns([0.9, 1.4, 4.2, 0.9])
 header_cols[0].markdown('<div class="table-header">교시</div>', unsafe_allow_html=True)
 header_cols[1].markdown('<div class="table-header">학급/구분</div>', unsafe_allow_html=True)
 header_cols[2].markdown('<div class="table-header">진도 또는 할 일</div>', unsafe_allow_html=True)
+header_cols[3].markdown('<div class="table-header">초기화</div>', unsafe_allow_html=True)
 st.markdown("---")
 
 for period in PERIODS:
@@ -1023,7 +1048,7 @@ for period in PERIODS:
     if input_key not in st.session_state:
         st.session_state[input_key] = ""
 
-    cols = st.columns([0.9, 1.4, 4.9])
+    cols = st.columns([0.9, 1.4, 4.2, 0.9])
     cols[0].write(period.replace("교시", ""))
 
     if class_name:
@@ -1040,17 +1065,31 @@ for period in PERIODS:
         placeholder=placeholder,
     )
 
+    cols[3].button(
+        "초기화",
+        key=f"clear_{safe_user}_{selected_day}_{period}",
+        on_click=clear_single_cell,
+        args=(selected_day, period, safe_user),
+    )
+
 homeroom_key = make_input_key(selected_day, "종례", safe_user)
 if homeroom_key not in st.session_state:
     st.session_state[homeroom_key] = ""
 
 st.markdown("#### 종례 사항")
-st.text_area(
+home_cols = st.columns([6, 1])
+home_cols[0].text_area(
     "종례 사항",
     key=homeroom_key,
     label_visibility="collapsed",
     height=110,
     placeholder="예: 숙제 안내, 준비물 공지, 생활지도, 전달사항",
+)
+home_cols[1].button(
+    "초기화",
+    key=f"clear_{safe_user}_{selected_day}_종례",
+    on_click=clear_single_cell,
+    args=(selected_day, "종례", safe_user),
 )
 
 st.button(
