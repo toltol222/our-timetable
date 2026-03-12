@@ -27,13 +27,12 @@ CONFIG_COLS = ["요일", "교시", "학급"]
 
 
 # -------------------------------------------------
-# 사용자/파일 유틸
+# 사용자 / 파일 유틸
 # -------------------------------------------------
 def sanitize_user_name(name: str) -> str:
     name = str(name).strip()
     if not name:
         return ""
-    # 파일명에 문제될 수 있는 문자만 제거/치환
     name = re.sub(r'[\\/:*?"<>|]', "_", name)
     name = re.sub(r"\s+", "_", name)
     return name
@@ -44,6 +43,25 @@ def get_user_paths(user_name: str) -> tuple[str, str]:
     data_path = os.path.join(BASE_DIR, f"data_{safe_name}.csv")
     config_path = os.path.join(BASE_DIR, f"config_{safe_name}.csv")
     return data_path, config_path
+
+
+# -------------------------------------------------
+# 키 생성 함수
+# -------------------------------------------------
+def make_date_key(day: str, user_id: str) -> str:
+    return f"lesson_date_{user_id}_{day}"
+
+
+def make_goal_key(day: str, user_id: str) -> str:
+    return f"goal_{user_id}_{day}"
+
+
+def make_input_key(day: str, row_name: str, user_id: str) -> str:
+    return f"content_{user_id}_{day}_{row_name}"
+
+
+def make_config_key(day: str, period: str, user_id: str) -> str:
+    return f"config_{user_id}_{day}_{period}"
 
 
 # -------------------------------------------------
@@ -93,7 +111,7 @@ def format_week_label(week_start: date) -> str:
 
 
 # -------------------------------------------------
-# 데이터 파일 처리
+# 파일 처리
 # -------------------------------------------------
 def create_empty_data_df() -> pd.DataFrame:
     return pd.DataFrame(columns=DATA_COLS)
@@ -533,11 +551,12 @@ def render_timetable_html(cells: dict) -> str:
 # -------------------------------------------------
 # 저장 콜백
 # -------------------------------------------------
-def save_day_planner(day: str, data_path: str, class_map: dict) -> None:
-    current_version = st.session_state[f"input_versions_{sanitize_user_name(st.session_state['teacher_name'])}"][day]
+def save_day_planner(day: str, data_path: str, class_map: dict, safe_user: str) -> None:
+    selected_week_key = f"selected_week_start_{safe_user}"
+    day_selector_key = f"day_selector_{safe_user}"
 
-    date_key = make_date_key(day, current_version)
-    goal_key = make_goal_key(day, current_version)
+    date_key = make_date_key(day, safe_user)
+    goal_key = make_goal_key(day, safe_user)
 
     selected_lesson_date = to_date_safe(st.session_state.get(date_key, date.today()))
     goal_text = str(st.session_state.get(goal_key, "")).strip()
@@ -549,7 +568,7 @@ def save_day_planner(day: str, data_path: str, class_map: dict) -> None:
     used_keys = [date_key, goal_key]
 
     for row_name in ROW_ORDER:
-        input_key = make_input_key(day, row_name, current_version)
+        input_key = make_input_key(day, row_name, safe_user)
         used_keys.append(input_key)
         content_text = str(st.session_state.get(input_key, "")).strip()
 
@@ -606,20 +625,19 @@ def save_day_planner(day: str, data_path: str, class_map: dict) -> None:
     if not rows_to_add:
         st.session_state["save_message"] = f"{day}요일은 저장할 내용이 없습니다."
         st.session_state["save_message_type"] = "warning"
-        st.session_state[f"day_selector_{sanitize_user_name(st.session_state['teacher_name'])}"] = day
+        st.session_state[day_selector_key] = day
         st.rerun()
 
     new_df = pd.DataFrame(rows_to_add, columns=DATA_COLS)
     append_rows_to_csv(data_path, new_df)
 
-    st.session_state[f"selected_week_start_{sanitize_user_name(st.session_state['teacher_name'])}"] = get_monday(selected_lesson_date)
-    st.session_state[f"day_selector_{sanitize_user_name(st.session_state['teacher_name'])}"] = day
+    st.session_state[selected_week_key] = get_monday(selected_lesson_date)
+    st.session_state[day_selector_key] = day
 
     for key in used_keys:
         if key in st.session_state:
             del st.session_state[key]
 
-    st.session_state[f"input_versions_{sanitize_user_name(st.session_state['teacher_name'])}"][day] += 1
     st.session_state["save_message"] = (
         f"{day}요일 내용 {len(rows_to_add)}건이 저장되었습니다. "
         f"(수업날짜: {lesson_date_str})"
@@ -649,12 +667,14 @@ st.markdown(
         font-weight: 800;
         color: var(--navy);
         margin-bottom: 0.2rem;
+        text-align: center;
     }
 
     .sub-text {
         color: var(--navy);
         opacity: 0.8;
         margin-bottom: 1rem;
+        text-align: center;
     }
 
     .section-card {
@@ -678,10 +698,29 @@ st.markdown(
         font-weight: 600;
     }
 
+    .welcome-box {
+        max-width: 720px;
+        margin: 60px auto 0 auto;
+        padding: 2rem 1.5rem;
+        border: 1px solid #D8E6F5;
+        border-radius: 18px;
+        background: #FFFFFF;
+        text-align: center;
+        box-shadow: 0 2px 8px rgba(18,58,99,0.04);
+    }
+
+    .center-help {
+        text-align: center;
+        color: #123A63;
+        font-weight: 700;
+        margin-bottom: 0.6rem;
+    }
+
     div[data-testid="stDateInput"] label,
     div[data-testid="stTextInput"] label,
     div[data-testid="stTextArea"] label,
-    div[data-testid="stSelectbox"] label {
+    div[data-testid="stSelectbox"] label,
+    div[data-testid="stRadio"] label {
         color: var(--navy) !important;
         font-weight: 700 !important;
     }
@@ -721,28 +760,6 @@ st.markdown(
         border-radius: 12px;
         overflow: hidden;
     }
-
-    .welcome-box {
-        padding: 2rem 1.5rem;
-        border: 1px solid #D8E6F5;
-        border-radius: 18px;
-        background: #FFFFFF;
-        text-align: center;
-        margin-top: 2rem;
-    }
-
-    .welcome-title {
-        color: #123A63;
-        font-size: 1.6rem;
-        font-weight: 800;
-        margin-bottom: 0.6rem;
-    }
-
-    .welcome-text {
-        color: #123A63;
-        font-size: 1rem;
-        opacity: 0.85;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -757,43 +774,55 @@ if "save_message" not in st.session_state:
 if "save_message_type" not in st.session_state:
     st.session_state["save_message_type"] = "success"
 
-# -------------------------------------------------
-# 사이드바: 사용자 식별
-# -------------------------------------------------
-with st.sidebar:
-    st.markdown("## 사용자 설정")
-    teacher_name = st.text_input(
-        "선생님 성함(ID)",
-        key="teacher_name",
-        placeholder="예: 김가혜",
-    )
+if "confirmed_teacher_name" not in st.session_state:
+    st.session_state["confirmed_teacher_name"] = ""
 
 # -------------------------------------------------
-# 초기 화면
+# 초기 이름 입력 화면
 # -------------------------------------------------
-if not str(teacher_name).strip():
+confirmed_name = st.session_state["confirmed_teacher_name"]
+
+if not confirmed_name:
+    st.markdown('<div class="main-title">📚 나만의 하이테크 진도표</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="sub-text">환영합니다! 성함을 입력하고 나만의 진도표를 시작하세요.</div>',
+        unsafe_allow_html=True,
+    )
+
     st.markdown(
         """
         <div class="welcome-box">
-            <div class="welcome-title">환영합니다!</div>
-            <div class="welcome-text">성함을 입력하고 나만의 진도표를 시작하세요.</div>
+            <div class="center-help">성함을 입력하고 Enter를 눌러주세요</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+    c1, c2, c3 = st.columns([1.2, 2.4, 1.2])
+    with c2:
+        typed_name = st.text_input(
+            "성함 입력",
+            placeholder="예: 김가혜",
+            key="teacher_name_input_main",
+            label_visibility="collapsed",
+        )
+
+    if typed_name and str(typed_name).strip():
+        st.session_state["confirmed_teacher_name"] = str(typed_name).strip()
+        st.rerun()
+
     st.stop()
 
+teacher_name = st.session_state["confirmed_teacher_name"]
 safe_user = sanitize_user_name(teacher_name)
 data_path, config_path = get_user_paths(teacher_name)
 
+# -------------------------------------------------
 # 사용자별 세션 상태 초기화
-input_versions_key = f"input_versions_{safe_user}"
+# -------------------------------------------------
 selected_week_key = f"selected_week_start_{safe_user}"
 day_selector_key = f"day_selector_{safe_user}"
 show_config_editor_key = f"show_config_editor_{safe_user}"
-
-if input_versions_key not in st.session_state:
-    st.session_state[input_versions_key] = {day: 0 for day in DAYS}
 
 if selected_week_key not in st.session_state:
     st.session_state[selected_week_key] = get_monday(date.today())
@@ -831,11 +860,17 @@ if st.session_state["save_message"]:
     st.session_state["save_message_type"] = "success"
 
 # -------------------------------------------------
-# 사이드바: 시간표 설정 버튼
+# 상단 사용자 제어
 # -------------------------------------------------
-with st.sidebar:
-    st.markdown("---")
-    if st.button("시간표 설정하기 / 수정", use_container_width=True):
+top_a, top_b = st.columns([6, 1.4])
+with top_b:
+    if st.button("사용자 변경", key=f"change_user_{safe_user}"):
+        st.session_state["confirmed_teacher_name"] = ""
+        st.rerun()
+
+tool_a, tool_b = st.columns([5, 1.5])
+with tool_b:
+    if st.button("시간표 설정하기 / 수정", use_container_width=True, key=f"config_toggle_{safe_user}"):
         st.session_state[show_config_editor_key] = not st.session_state[show_config_editor_key]
 
 # -------------------------------------------------
@@ -850,7 +885,6 @@ if st.session_state[show_config_editor_key]:
     st.markdown("## 시간표 설정")
     st.markdown('<div class="section-card">', unsafe_allow_html=True)
 
-    config_inputs = {}
     header_cols = st.columns([0.9] + [1.3] * len(DAYS))
     header_cols[0].markdown('<div class="table-header">교시</div>', unsafe_allow_html=True)
     for i, day in enumerate(DAYS, start=1):
@@ -864,17 +898,15 @@ if st.session_state[show_config_editor_key]:
 
         for i, day in enumerate(DAYS, start=1):
             existing_value = ""
-            matched = config_df[
-                (config_df["요일"] == day) & (config_df["교시"] == period)
-            ]
+            matched = config_df[(config_df["요일"] == day) & (config_df["교시"] == period)]
             if not matched.empty:
                 existing_value = str(matched.iloc[0]["학급"]).strip()
 
-            key = f"config_{safe_user}_{day}_{period}"
+            key = make_config_key(day, period, safe_user)
             if key not in st.session_state:
                 st.session_state[key] = existing_value
 
-            config_inputs[(day, period)] = row_cols[i].text_input(
+            row_cols[i].text_input(
                 label=f"{day}_{period}",
                 key=key,
                 label_visibility="collapsed",
@@ -889,7 +921,7 @@ if st.session_state[show_config_editor_key]:
                     {
                         "요일": day,
                         "교시": period,
-                        "학급": str(st.session_state.get(f"config_{safe_user}_{day}_{period}", "")).strip(),
+                        "학급": str(st.session_state.get(make_config_key(day, period, safe_user), "")).strip(),
                     }
                 )
 
@@ -902,7 +934,7 @@ if st.session_state[show_config_editor_key]:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# 시간표가 아직 없으면 여기서 중단
+# 다시 로드
 config_df = load_user_config(config_path)
 class_map = build_class_map(config_df)
 timetable_exists = has_any_timetable(config_df)
@@ -933,7 +965,7 @@ st.session_state[selected_week_key] = selected_week_start
 selected_week_df = filter_df_by_week(prepared_df, selected_week_start)
 
 # -------------------------------------------------
-# 요일 선택 (자동 오늘 요일)
+# 요일 선택
 # -------------------------------------------------
 st.markdown("### 요일 선택")
 selected_day = st.radio(
@@ -952,9 +984,8 @@ st.session_state[day_selector_key] = selected_day
 st.markdown(f"## {selected_day}요일 입력")
 st.markdown('<div class="section-card">', unsafe_allow_html=True)
 
-current_version = st.session_state[input_versions_key][selected_day]
-date_key = make_date_key(selected_day, current_version)
-goal_key = make_goal_key(selected_day, current_version)
+date_key = make_date_key(selected_day, safe_user)
+goal_key = make_goal_key(selected_day, safe_user)
 
 if date_key not in st.session_state:
     weekday_idx = DAYS.index(selected_day)
@@ -987,7 +1018,7 @@ st.markdown("---")
 
 for period in PERIODS:
     class_name = class_map.get((selected_day, period), "")
-    input_key = make_input_key(selected_day, period, current_version)
+    input_key = make_input_key(selected_day, period, safe_user)
 
     if input_key not in st.session_state:
         st.session_state[input_key] = ""
@@ -1009,7 +1040,7 @@ for period in PERIODS:
         placeholder=placeholder,
     )
 
-homeroom_key = make_input_key(selected_day, "종례", current_version)
+homeroom_key = make_input_key(selected_day, "종례", safe_user)
 if homeroom_key not in st.session_state:
     st.session_state[homeroom_key] = ""
 
@@ -1026,7 +1057,7 @@ st.button(
     f"{selected_day}요일 저장하기",
     key=f"save_button_{safe_user}_{selected_day}",
     on_click=save_day_planner,
-    args=(selected_day, data_path, class_map),
+    args=(selected_day, data_path, class_map, safe_user),
 )
 
 st.markdown("</div>", unsafe_allow_html=True)
