@@ -113,9 +113,6 @@ def format_week_label(week_start: date) -> str:
 
 
 def generate_year_week_starts(year: int) -> list[date]:
-    """
-    해당 연도의 모든 월~금 주차 시작일(월요일) 생성
-    """
     start = date(year, 1, 1)
     end = date(year, 12, 31)
 
@@ -162,6 +159,10 @@ def append_rows_to_csv(data_path: str, new_df: pd.DataFrame) -> None:
         index=False,
         encoding="utf-8" if has_data else "utf-8-sig",
     )
+
+
+def save_user_data(data_path: str, df: pd.DataFrame) -> None:
+    df.to_csv(data_path, index=False, encoding="utf-8-sig")
 
 
 def load_user_data(data_path: str) -> pd.DataFrame:
@@ -237,7 +238,6 @@ def has_any_timetable(config_df: pd.DataFrame) -> bool:
 # 데이터 가공
 # -------------------------------------------------
 def get_available_week_starts(df: pd.DataFrame, planning_year: int) -> list[date]:
-    # 2026년 전체 주차 + 기존 데이터가 있는 주차 모두 포함
     year_weeks = generate_year_week_starts(planning_year)
     data_weeks = []
 
@@ -565,11 +565,36 @@ def render_timetable_html(cells: dict) -> str:
 
 
 # -------------------------------------------------
-# 개별 칸 초기화 콜백
+# 개별 칸 초기화: CSV 연동 삭제
 # -------------------------------------------------
-def clear_single_cell(day: str, row_name: str, safe_user: str) -> None:
-    key = make_input_key(day, row_name, safe_user)
-    st.session_state[key] = ""
+def delete_saved_cell(day: str, row_name: str, safe_user: str, data_path: str) -> None:
+    date_key = make_date_key(day, safe_user)
+    selected_lesson_date = to_date_safe(st.session_state.get(date_key, date.today()))
+    lesson_date_str = selected_lesson_date.strftime("%Y-%m-%d")
+
+    df = load_user_data(data_path)
+
+    if df.empty:
+        # 입력창 값만 비우고 종료
+        st.session_state[make_input_key(day, row_name, safe_user)] = ""
+        st.rerun()
+
+    mask = (
+        (df["수업날짜"].astype(str) == lesson_date_str)
+        & (df["요일"].astype(str) == day)
+        & (df["교시"].astype(str) == row_name)
+    )
+
+    # 해당 날짜/요일/교시의 저장 기록 전체 제거
+    updated_df = df.loc[~mask].copy()
+    save_user_data(data_path, updated_df)
+
+    # 현재 입력창도 즉시 비움
+    st.session_state[make_input_key(day, row_name, safe_user)] = ""
+
+    st.session_state["save_message"] = f"{day} {row_name} 기록이 초기화되었습니다."
+    st.session_state["save_message_type"] = "success"
+    st.rerun()
 
 
 # -------------------------------------------------
@@ -589,7 +614,7 @@ def save_day_planner(day: str, data_path: str, class_map: dict, safe_user: str) 
     lesson_date_str = selected_lesson_date.strftime("%Y-%m-%d")
 
     rows_to_add = []
-    used_keys = [date_key, goal_key]
+    used_keys = [goal_key]
 
     for row_name in ROW_ORDER:
         input_key = make_input_key(day, row_name, safe_user)
@@ -967,7 +992,7 @@ if not timetable_exists:
     st.stop()
 
 # -------------------------------------------------
-# 상단: 주차 선택
+# 상단: 주차 선택 (2026년 전체)
 # -------------------------------------------------
 available_week_starts = get_available_week_starts(prepared_df, PLANNING_YEAR)
 if st.session_state[selected_week_key] not in available_week_starts:
@@ -1068,8 +1093,8 @@ for period in PERIODS:
     cols[3].button(
         "초기화",
         key=f"clear_{safe_user}_{selected_day}_{period}",
-        on_click=clear_single_cell,
-        args=(selected_day, period, safe_user),
+        on_click=delete_saved_cell,
+        args=(selected_day, period, safe_user, data_path),
     )
 
 homeroom_key = make_input_key(selected_day, "종례", safe_user)
@@ -1088,8 +1113,8 @@ home_cols[0].text_area(
 home_cols[1].button(
     "초기화",
     key=f"clear_{safe_user}_{selected_day}_종례",
-    on_click=clear_single_cell,
-    args=(selected_day, "종례", safe_user),
+    on_click=delete_saved_cell,
+    args=(selected_day, "종례", safe_user, data_path),
 )
 
 st.button(
