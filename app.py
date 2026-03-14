@@ -1,10 +1,42 @@
 # app.py
-import os
+# =========================================================
+# [중요] requirements.txt 예시
+# streamlit>=1.28
+# st-gsheets-connection
+# pandas
+#
+# [중요] Google Sheet 안에 아래 워크시트(tab)를 미리 만들어 주세요.
+# 1) PlannerData
+# 2) PlannerConfig
+#
+# [중요] Streamlit Secrets 형식 예시
+# (로컬: .streamlit/secrets.toml / 배포: Streamlit Cloud > App settings > Secrets)
+#
+# [connections.gsheets]
+# spreadsheet = "https://docs.google.com/spreadsheets/d/여기에_스프레드시트_ID_or_URL/edit#gid=0"
+# type = "service_account"
+# project_id = "xxx"
+# private_key_id = "xxx"
+# private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+# client_email = "xxx@xxx.iam.gserviceaccount.com"
+# client_id = "xxx"
+# auth_uri = "https://accounts.google.com/o/oauth2/auth"
+# token_uri = "https://oauth2.googleapis.com/token"
+# auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
+# client_x509_cert_url = "xxx"
+#
+# [설정 팁]
+# - Google Cloud에서 서비스 계정을 만들고
+# - 그 서비스 계정 이메일을 구글 시트에 공유해야 합니다.
+# - 이 앱은 읽기+쓰기(update)가 필요하므로 Editor 권한으로 공유하는 것을 권장합니다.
+# =========================================================
+
 import re
 from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 
 # -------------------------------------------------
 # 기본 설정
@@ -15,21 +47,59 @@ st.set_page_config(
     layout="wide",
 )
 
-BASE_DIR = "planner_users"
-os.makedirs(BASE_DIR, exist_ok=True)
-
 DAYS = ["월", "화", "수", "목", "금"]
 PERIODS = ["1교시", "2교시", "3교시", "4교시", "5교시", "6교시", "7교시"]
 ROW_ORDER = PERIODS + ["종례"]
 
-DATA_COLS = ["수업날짜", "기록일시", "요일", "구분", "교시", "반", "유형", "내용", "목표"]
-CONFIG_COLS = ["요일", "교시", "학급"]
-
 PLANNING_YEAR = 2026
+
+DATA_WORKSHEET = "PlannerData"
+CONFIG_WORKSHEET = "PlannerConfig"
+
+# 사용자 식별 열 추가
+DATA_COLS = ["ID", "수업날짜", "기록일시", "요일", "구분", "교시", "반", "유형", "내용", "목표"]
+CONFIG_COLS = ["ID", "요일", "교시", "학급"]
 
 
 # -------------------------------------------------
-# 사용자 / 파일 유틸
+# Google Sheets 연결
+# -------------------------------------------------
+@st.cache_resource
+def get_gsheets_conn():
+    return st.connection("gsheets", type=GSheetsConnection)
+
+
+def normalize_df_columns(df: pd.DataFrame, expected_cols: list[str]) -> pd.DataFrame:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=expected_cols)
+
+    temp = df.copy()
+    for col in expected_cols:
+        if col not in temp.columns:
+            temp[col] = ""
+    temp = temp[expected_cols].copy()
+    return temp.fillna("")
+
+
+def read_sheet_df(worksheet_name: str, expected_cols: list[str]) -> pd.DataFrame:
+    conn = get_gsheets_conn()
+    try:
+        df = conn.read(worksheet=worksheet_name, ttl=0)
+    except Exception:
+        return pd.DataFrame(columns=expected_cols)
+
+    return normalize_df_columns(df, expected_cols)
+
+
+def write_sheet_df(worksheet_name: str, df: pd.DataFrame, expected_cols: list[str]) -> None:
+    conn = get_gsheets_conn()
+    safe_df = normalize_df_columns(df, expected_cols)
+    conn.update(worksheet=worksheet_name, data=safe_df)
+    st.cache_data.clear()
+
+
+# -------------------------------------------------
+# 사용자 / 식별 유틸
 # -------------------------------------------------
 def sanitize_user_name(name: str) -> str:
     name = str(name).strip()
@@ -38,13 +108,6 @@ def sanitize_user_name(name: str) -> str:
     name = re.sub(r'[\\/:*?"<>|]', "_", name)
     name = re.sub(r"\s+", "_", name)
     return name
-
-
-def get_user_paths(user_name: str) -> tuple[str, str]:
-    safe_name = sanitize_user_name(user_name)
-    data_path = os.path.join(BASE_DIR, f"data_{safe_name}.csv")
-    config_path = os.path.join(BASE_DIR, f"config_{safe_name}.csv")
-    return data_path, config_path
 
 
 # -------------------------------------------------
@@ -125,7 +188,7 @@ def generate_year_week_starts(year: int) -> list[date]:
 
 
 # -------------------------------------------------
-# 파일 처리
+# 데이터프레임 생성
 # -------------------------------------------------
 def create_empty_data_df() -> pd.DataFrame:
     return pd.DataFrame(columns=DATA_COLS)
@@ -135,74 +198,116 @@ def create_empty_config_df() -> pd.DataFrame:
     rows = []
     for day in DAYS:
         for period in PERIODS:
-            rows.append({"요일": day, "교시": period, "학급": ""})
+            rows.append({"ID": "", "요일": day, "교시": period, "학급": ""})
     return pd.DataFrame(rows, columns=CONFIG_COLS)
 
 
-def ensure_data_file_exists(data_path: str) -> None:
-    if not os.path.exists(data_path):
-        create_empty_data_df().to_csv(data_path, index=False, encoding="utf-8-sig")
+# -------------------------------------------------
+# Google Sheets 기반 데이터 처리
+# -------------------------------------------------
+def load_user_data(user_name: str) -> pd.DataFrame:
+    teacher_id = str(user_name).strip()
+    all_df = read_sheet_df(DATA_WORKSHEET, DATA_COLS)
+    if all_df.empty:
+        return create_empty_data_df()
+
+    temp = all_df[all_df["ID"].astype(str).str.strip() == teacher_id].copy()
+    return normalize_df_columns(temp, DATA_COLS)
 
 
-def ensure_config_file_exists(config_path: str) -> None:
-    if not os.path.exists(config_path):
-        create_empty_config_df().to_csv(config_path, index=False, encoding="utf-8-sig")
+def load_user_config(user_name: str) -> pd.DataFrame:
+    teacher_id = str(user_name).strip()
+    all_df = read_sheet_df(CONFIG_WORKSHEET, CONFIG_COLS)
+    if all_df.empty:
+        return create_empty_config_df()
 
+    temp = all_df[all_df["ID"].astype(str).str.strip() == teacher_id].copy()
+    temp = normalize_df_columns(temp, CONFIG_COLS)
 
-def append_rows_to_csv(data_path: str, new_df: pd.DataFrame) -> None:
-    ensure_data_file_exists(data_path)
-    has_data = os.path.getsize(data_path) > 0
-    new_df.to_csv(
-        data_path,
-        mode="a",
-        header=not has_data,
-        index=False,
-        encoding="utf-8" if has_data else "utf-8-sig",
+    # 사용자의 설정이 한 줄도 없으면 기본 골격 반환
+    if temp.empty:
+        temp = create_empty_config_df().copy()
+        temp["ID"] = teacher_id
+        return temp
+
+    # 누락 교시/요일 보정
+    base = create_empty_config_df().copy()
+    base["ID"] = teacher_id
+
+    merged = base.merge(
+        temp,
+        on=["ID", "요일", "교시"],
+        how="left",
+        suffixes=("_base", ""),
     )
 
+    if "학급" not in merged.columns:
+        merged["학급"] = ""
+    merged["학급"] = merged["학급"].fillna("")
 
-def save_user_data(data_path: str, df: pd.DataFrame) -> None:
-    df.to_csv(data_path, index=False, encoding="utf-8-sig")
-
-
-def load_user_data(data_path: str) -> pd.DataFrame:
-    ensure_data_file_exists(data_path)
-    try:
-        df = pd.read_csv(data_path, dtype=str).fillna("")
-    except Exception:
-        return create_empty_data_df()
-
-    if df.empty:
-        return create_empty_data_df()
-
-    for col in DATA_COLS:
-        if col not in df.columns:
-            df[col] = ""
-    return df[DATA_COLS].copy().fillna("")
+    return merged[CONFIG_COLS].copy().fillna("")
 
 
-def load_user_config(config_path: str) -> pd.DataFrame:
-    ensure_config_file_exists(config_path)
-    try:
-        df = pd.read_csv(config_path, dtype=str).fillna("")
-    except Exception:
-        return create_empty_config_df()
+def save_user_config(user_name: str, config_df: pd.DataFrame) -> None:
+    teacher_id = str(user_name).strip()
+    all_df = read_sheet_df(CONFIG_WORKSHEET, CONFIG_COLS)
 
-    if df.empty:
-        return create_empty_config_df()
+    if all_df.empty:
+        all_df = create_empty_config_df()
 
-    for col in CONFIG_COLS:
-        if col not in df.columns:
-            df[col] = ""
-    return df[CONFIG_COLS].copy().fillna("")
+    # 해당 사용자 기존 설정 제거 후 새 설정 반영
+    remain = all_df[all_df["ID"].astype(str).str.strip() != teacher_id].copy()
+
+    new_df = normalize_df_columns(config_df.copy(), CONFIG_COLS)
+    new_df["ID"] = teacher_id
+
+    updated = pd.concat([remain, new_df], ignore_index=True)
+    updated = normalize_df_columns(updated, CONFIG_COLS)
+    write_sheet_df(CONFIG_WORKSHEET, updated, CONFIG_COLS)
 
 
-def save_user_config(config_path: str, config_df: pd.DataFrame) -> None:
-    config_df.to_csv(config_path, index=False, encoding="utf-8-sig")
+def append_rows_to_gsheet(user_name: str, new_df: pd.DataFrame) -> None:
+    teacher_id = str(user_name).strip()
+    all_df = read_sheet_df(DATA_WORKSHEET, DATA_COLS)
+
+    if all_df.empty:
+        all_df = create_empty_data_df()
+
+    add_df = normalize_df_columns(new_df.copy(), DATA_COLS)
+    add_df["ID"] = teacher_id
+
+    updated = pd.concat([all_df, add_df], ignore_index=True)
+    updated = normalize_df_columns(updated, DATA_COLS)
+    write_sheet_df(DATA_WORKSHEET, updated, DATA_COLS)
+
+
+def delete_rows_from_gsheet(user_name: str, day: str, row_name: str, lesson_date_str: str) -> None:
+    teacher_id = str(user_name).strip()
+    all_df = read_sheet_df(DATA_WORKSHEET, DATA_COLS)
+
+    if all_df.empty:
+        return
+
+    mask = (
+        (all_df["ID"].astype(str).str.strip() == teacher_id)
+        & (all_df["수업날짜"].astype(str).str.strip() == lesson_date_str)
+        & (all_df["요일"].astype(str).str.strip() == day)
+        & (all_df["교시"].astype(str).str.strip() == row_name)
+    )
+
+    updated = all_df.loc[~mask].copy()
+    updated = normalize_df_columns(updated, DATA_COLS)
+    write_sheet_df(DATA_WORKSHEET, updated, DATA_COLS)
 
 
 def prepare_log_df(df: pd.DataFrame) -> pd.DataFrame:
     temp = df.copy()
+    if temp.empty:
+        temp["수업날짜_dt"] = pd.Series(dtype="datetime64[ns]")
+        temp["기록일시_dt"] = pd.Series(dtype="datetime64[ns]")
+        temp["주차시작"] = pd.Series(dtype="object")
+        return temp
+
     temp["수업날짜_dt"] = pd.to_datetime(temp["수업날짜"], errors="coerce")
     temp["기록일시_dt"] = pd.to_datetime(temp["기록일시"], errors="coerce")
     temp["주차시작"] = temp["수업날짜_dt"].dt.date.apply(
@@ -565,31 +670,17 @@ def render_timetable_html(cells: dict) -> str:
 
 
 # -------------------------------------------------
-# 개별 칸 초기화: CSV 연동 삭제
+# 개별 칸 초기화: Google Sheets 연동 삭제
 # -------------------------------------------------
-def delete_saved_cell(day: str, row_name: str, safe_user: str, data_path: str) -> None:
+def delete_saved_cell(day: str, row_name: str, safe_user: str, teacher_name: str) -> None:
     date_key = make_date_key(day, safe_user)
     selected_lesson_date = to_date_safe(st.session_state.get(date_key, date.today()))
     lesson_date_str = selected_lesson_date.strftime("%Y-%m-%d")
 
-    df = load_user_data(data_path)
+    # Google Sheets에서 삭제
+    delete_rows_from_gsheet(teacher_name, day, row_name, lesson_date_str)
 
-    if df.empty:
-        # 입력창 값만 비우고 종료
-        st.session_state[make_input_key(day, row_name, safe_user)] = ""
-        st.rerun()
-
-    mask = (
-        (df["수업날짜"].astype(str) == lesson_date_str)
-        & (df["요일"].astype(str) == day)
-        & (df["교시"].astype(str) == row_name)
-    )
-
-    # 해당 날짜/요일/교시의 저장 기록 전체 제거
-    updated_df = df.loc[~mask].copy()
-    save_user_data(data_path, updated_df)
-
-    # 현재 입력창도 즉시 비움
+    # 현재 입력창 즉시 비움
     st.session_state[make_input_key(day, row_name, safe_user)] = ""
 
     st.session_state["save_message"] = f"{day} {row_name} 기록이 초기화되었습니다."
@@ -600,7 +691,7 @@ def delete_saved_cell(day: str, row_name: str, safe_user: str, data_path: str) -
 # -------------------------------------------------
 # 저장 콜백
 # -------------------------------------------------
-def save_day_planner(day: str, data_path: str, class_map: dict, safe_user: str) -> None:
+def save_day_planner(day: str, teacher_name: str, class_map: dict, safe_user: str) -> None:
     selected_week_key = f"selected_week_start_{safe_user}"
     day_selector_key = f"day_selector_{safe_user}"
 
@@ -627,6 +718,7 @@ def save_day_planner(day: str, data_path: str, class_map: dict, safe_user: str) 
         if row_name == "종례":
             rows_to_add.append(
                 {
+                    "ID": teacher_name,
                     "수업날짜": lesson_date_str,
                     "기록일시": current_time,
                     "요일": day,
@@ -644,6 +736,7 @@ def save_day_planner(day: str, data_path: str, class_map: dict, safe_user: str) 
 
             rows_to_add.append(
                 {
+                    "ID": teacher_name,
                     "수업날짜": lesson_date_str,
                     "기록일시": current_time,
                     "요일": day,
@@ -659,6 +752,7 @@ def save_day_planner(day: str, data_path: str, class_map: dict, safe_user: str) 
     if not rows_to_add and goal_text:
         rows_to_add.append(
             {
+                "ID": teacher_name,
                 "수업날짜": lesson_date_str,
                 "기록일시": current_time,
                 "요일": day,
@@ -678,7 +772,7 @@ def save_day_planner(day: str, data_path: str, class_map: dict, safe_user: str) 
         st.rerun()
 
     new_df = pd.DataFrame(rows_to_add, columns=DATA_COLS)
-    append_rows_to_csv(data_path, new_df)
+    append_rows_to_gsheet(teacher_name, new_df)
 
     st.session_state[selected_week_key] = get_monday(selected_lesson_date)
     st.session_state[day_selector_key] = day
@@ -864,7 +958,6 @@ if not confirmed_name:
 
 teacher_name = st.session_state["confirmed_teacher_name"]
 safe_user = sanitize_user_name(teacher_name)
-data_path, config_path = get_user_paths(teacher_name)
 
 # -------------------------------------------------
 # 사용자별 세션 상태 초기화
@@ -885,9 +978,9 @@ if show_config_editor_key not in st.session_state:
 # -------------------------------------------------
 # 데이터/설정 불러오기
 # -------------------------------------------------
-raw_df = load_user_data(data_path)
+raw_df = load_user_data(teacher_name)
 prepared_df = prepare_log_df(raw_df)
-config_df = load_user_config(config_path)
+config_df = load_user_config(teacher_name)
 class_map = build_class_map(config_df)
 timetable_exists = has_any_timetable(config_df)
 
@@ -968,6 +1061,7 @@ if st.session_state[show_config_editor_key]:
             for period in PERIODS:
                 rows.append(
                     {
+                        "ID": teacher_name,
                         "요일": day,
                         "교시": period,
                         "학급": str(st.session_state.get(make_config_key(day, period, safe_user), "")).strip(),
@@ -975,7 +1069,7 @@ if st.session_state[show_config_editor_key]:
                 )
 
         new_config_df = pd.DataFrame(rows, columns=CONFIG_COLS)
-        save_user_config(config_path, new_config_df)
+        save_user_config(teacher_name, new_config_df)
         st.session_state["save_message"] = "시간표가 저장되었습니다."
         st.session_state["save_message_type"] = "success"
         st.session_state[show_config_editor_key] = False
@@ -984,7 +1078,7 @@ if st.session_state[show_config_editor_key]:
     st.markdown("</div>", unsafe_allow_html=True)
 
 # 다시 로드
-config_df = load_user_config(config_path)
+config_df = load_user_config(teacher_name)
 class_map = build_class_map(config_df)
 timetable_exists = has_any_timetable(config_df)
 
@@ -1094,7 +1188,7 @@ for period in PERIODS:
         "초기화",
         key=f"clear_{safe_user}_{selected_day}_{period}",
         on_click=delete_saved_cell,
-        args=(selected_day, period, safe_user, data_path),
+        args=(selected_day, period, safe_user, teacher_name),
     )
 
 homeroom_key = make_input_key(selected_day, "종례", safe_user)
@@ -1114,14 +1208,14 @@ home_cols[1].button(
     "초기화",
     key=f"clear_{safe_user}_{selected_day}_종례",
     on_click=delete_saved_cell,
-    args=(selected_day, "종례", safe_user, data_path),
+    args=(selected_day, "종례", safe_user, teacher_name),
 )
 
 st.button(
     f"{selected_day}요일 저장하기",
     key=f"save_button_{safe_user}_{selected_day}",
     on_click=save_day_planner,
-    args=(selected_day, data_path, class_map, safe_user),
+    args=(selected_day, teacher_name, class_map, safe_user),
 )
 
 st.markdown("</div>", unsafe_allow_html=True)
@@ -1168,5 +1262,5 @@ st.download_button(
     use_container_width=True,
 )
 
-st.caption(f"데이터 파일: {data_path}")
-st.caption(f"시간표 설정 파일: {config_path}")
+st.caption(f"Google Sheets 데이터 워크시트: {DATA_WORKSHEET}")
+st.caption(f"Google Sheets 시간표 워크시트: {CONFIG_WORKSHEET}")
